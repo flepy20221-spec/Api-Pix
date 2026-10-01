@@ -286,6 +286,38 @@ class PixApiAuthTest(unittest.TestCase):
         self.assertNotIn("PRIVATE-ERROR-CONTENT", response.text)
         purchase.assert_not_called()
 
+    def test_provider_lookup_502_explains_outage_without_leaking_response(self):
+        import os
+        import requests
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from app import core
+        from main import app
+
+        provider_response = requests.Response()
+        provider_response.status_code = 502
+        provider_response._content = b"PRIVATE-PROVIDER-CONTENT"
+        error = requests.HTTPError("PRIVATE-PROVIDER-CONTENT", response=provider_response)
+        with patch.dict(os.environ, {"PIX_API_TOKEN": "unit-test-token"}, clear=False), \
+             patch.object(core, "_ensure_auth"), \
+             patch.object(core, "get_startup", return_value={}), \
+             patch.object(core, "get_pins", return_value={"statusCode": 0}), \
+             patch.object(core, "get_pix_participants", return_value=[]), \
+             patch.object(core, "post_pix_payment_by_key", side_effect=error), \
+             patch.object(core, "execute_purchase") as purchase:
+            response = TestClient(app).post(
+                "/pix/key",
+                headers={"Authorization": "Bearer unit-test-token"},
+                json={"key_type": "EMAIL", "key_value": "email@example.com", "amount": "2.04"},
+            )
+        self.assertEqual(response.status_code, 503)
+        detail = response.json()["detail"]
+        self.assertTrue(detail["retry_safe"])
+        self.assertFalse(detail["uncertain"])
+        self.assertIn("não conseguiu consultar a chave", detail["message"])
+        self.assertNotIn("PRIVATE-PROVIDER-CONTENT", response.text)
+        purchase.assert_not_called()
+
     def test_purchase_failure_is_uncertain_and_does_not_retry_purchase(self):
         import os
         from unittest.mock import patch
