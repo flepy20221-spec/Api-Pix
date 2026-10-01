@@ -157,7 +157,7 @@ class PixKeyNormalizationTest(unittest.TestCase):
         from unittest.mock import patch
         from app import core
 
-        with patch.object(core, "PIX_HMAC_SECRET", "unit-test-only"), patch.object(core.session, "post") as post:
+        with patch.object(core, "_ensure_auth"), patch.object(core, "PIX_HMAC_SECRET", "unit-test-only"), patch.object(core.session, "post") as post:
             post.return_value.status_code = 200
             post.return_value.json.return_value = {"id": "fake"}
             post.return_value.raise_for_status.return_value = None
@@ -165,6 +165,91 @@ class PixKeyNormalizationTest(unittest.TestCase):
             sent_payload = post.call_args.kwargs["json"]
             self.assertEqual(sent_payload["receiver"]["key"], "12345678909")
             self.assertEqual(sent_payload["integrityHash"], core.build_integrity_hash("12345678909"))
+
+
+class PixAuthRefreshTest(unittest.TestCase):
+    def test_provider_error_code_is_logged_without_response_details(self):
+        import requests
+        from app import core
+
+        response = requests.Response()
+        response.status_code = 503
+        response._content = b'{"code":"lookup_unavailable","details":"PRIVATE-KEY"}'
+        error = core.PixPreparationError("recipient_lookup", requests.HTTPError("failed", response=response))
+        self.assertEqual(error.provider_status, 503)
+        self.assertEqual(error.provider_code, "lookup_unavailable")
+        self.assertNotIn("PRIVATE-KEY", str(error))
+
+    def test_balance_retries_once_with_new_bearer_after_401(self):
+        import requests
+        from unittest.mock import patch
+        from app import core
+
+        seen = []
+        def send(*args, **kwargs):
+            seen.append(kwargs["headers"]["authorization"])
+            response = requests.Response()
+            response.status_code = 401 if len(seen) == 1 else 200
+            response._content = b'{"amount": 10}'
+            return response
+
+        with patch.object(core, "_ensure_auth"), \
+             patch.object(core.session, "headers", {"authorization": "Bearer stale"}), \
+             patch.object(core.session, "get", side_effect=send), \
+             patch.object(core, "renovar_bearer_token", side_effect=lambda: core.session.headers.update(
+                 {"authorization": "Bearer renewed"})) as renew:
+            self.assertEqual(core.get_balance()["amount"], 10)
+            renew.assert_called_once()
+        self.assertEqual(seen, ["Bearer stale", "Bearer renewed"])
+
+    def test_lookup_retries_401_with_new_bearer(self):
+        import requests
+        from unittest.mock import patch
+        from app import core
+
+        seen = []
+        def send(*args, **kwargs):
+            seen.append(kwargs["headers"]["authorization"])
+            response = requests.Response()
+            response.status_code = 401 if len(seen) == 1 else 200
+            response._content = b'{"id": "fake"}'
+            return response
+
+        with patch.object(core, "_ensure_auth"), patch.object(core, "PIX_HMAC_SECRET", "unit-test-only"), \
+             patch.object(core.session, "headers", {"authorization": "Bearer stale"}), \
+             patch.object(core.session, "post", side_effect=send), \
+             patch.object(core, "renovar_bearer_token", side_effect=lambda: core.session.headers.update(
+                 {"authorization": "Bearer renewed"})) as renew:
+            self.assertEqual(core.post_pix_payment_by_key("EMAIL", "email@example.com")["id"], "fake")
+            renew.assert_called_once()
+        self.assertEqual(seen, ["Bearer stale", "Bearer renewed"])
+
+    def test_lookup_retries_transient_503_but_not_invalid_key_422(self):
+        import requests
+        from unittest.mock import patch
+        from app import core
+
+        def response(code, content):
+            result = requests.Response()
+            result.status_code = code
+            result._content = content
+            return result
+
+        with patch.object(core, "_ensure_auth"), patch.object(core, "PIX_HMAC_SECRET", "unit-test-only"), \
+             patch.object(core.time, "sleep") as sleep, \
+             patch.object(core.session, "post", side_effect=[
+                 response(503, b'{"error":"upstream_unavailable"}'),
+                 response(200, b'{"id":"fake"}'),
+             ]) as post:
+            self.assertEqual(core.post_pix_payment_by_key("EMAIL", "email@example.com")["id"], "fake")
+            self.assertEqual(post.call_count, 2)
+            sleep.assert_called_once_with(1)
+
+        with patch.object(core, "_ensure_auth"), patch.object(core, "PIX_HMAC_SECRET", "unit-test-only"), \
+             patch.object(core.session, "post", return_value=response(422, b'{"code":"dict_key_not_found"}')) as post:
+            with self.assertRaises(core.PixError):
+                core.post_pix_payment_by_key("EMAIL", "email@example.com")
+            post.assert_called_once()
 
 
 class PixUncertainOutcomeTest(unittest.TestCase):

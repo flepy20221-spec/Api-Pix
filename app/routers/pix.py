@@ -345,8 +345,8 @@ def pagar_por_chave(req: PixKeyRequest, request: Request):
     except PixPreparationError as e:
         request_id = _request_id(request)
         log.warning(
-            "PIX preparation failed request_id=%s stage=%s provider_http=%s cause=%s",
-            request_id, e.stage, e.provider_status, type(e.__cause__).__name__,
+            "PIX preparation failed request_id=%s stage=%s provider_http=%s provider_code=%s cause=%s",
+            request_id, e.stage, e.provider_status, e.provider_code, type(e.__cause__).__name__,
         )
         message = (
             "A carteira PIX não conseguiu consultar a chave neste momento. "
