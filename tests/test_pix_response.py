@@ -168,6 +168,16 @@ class PixKeyNormalizationTest(unittest.TestCase):
 
 
 class PixUncertainOutcomeTest(unittest.TestCase):
+    def test_terminal_provider_failure_takes_precedence_over_done_flag(self):
+        formatted = _format_pix_response({
+            "success": True,
+            "amount": "1.00",
+            "receiver": {},
+            "result": {"status": "failed", "done": True},
+        })
+        self.assertFalse(formatted["success"])
+        self.assertEqual(formatted["transaction"]["status"], "failed")
+
     def test_processing_and_authentication_are_not_successful_or_retry_safe(self):
         for status in ("processing", "pending_authentication"):
             with self.subTest(status=status):
@@ -250,6 +260,58 @@ class PixApiAuthTest(unittest.TestCase):
         self.assertTrue(detail["uncertain"])
         self.assertTrue(detail["request_id"])
         self.assertNotIn("PRIVATE-ERROR-CONTENT", response.text)
+
+    def test_pre_purchase_failure_is_retry_safe_and_does_not_execute_purchase(self):
+        import os
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from app import core
+        from main import app
+
+        with patch.dict(os.environ, {"PIX_API_TOKEN": "unit-test-token"}, clear=False), \
+             patch.object(core, "_ensure_auth"), \
+             patch.object(core, "get_startup", return_value={}), \
+             patch.object(core, "get_pins", return_value={"statusCode": 0}), \
+             patch.object(core, "get_pix_participants", return_value=[]), \
+             patch.object(core, "post_pix_payment_by_key", side_effect=RuntimeError("PRIVATE-ERROR-CONTENT")), \
+             patch.object(core, "execute_purchase") as purchase:
+            response = TestClient(app).post(
+                "/pix/key",
+                headers={"Authorization": "Bearer unit-test-token"},
+                json={"key_type": "CPF", "key_value": "123.456.789-09", "amount": "1.00"},
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertTrue(response.json()["detail"]["retry_safe"])
+        self.assertFalse(response.json()["detail"]["uncertain"])
+        self.assertNotIn("PRIVATE-ERROR-CONTENT", response.text)
+        purchase.assert_not_called()
+
+    def test_purchase_failure_is_uncertain_and_does_not_retry_purchase(self):
+        import os
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from app import core
+        from main import app
+
+        with patch.dict(os.environ, {"PIX_API_TOKEN": "unit-test-token"}, clear=False), \
+             patch.object(core, "_ensure_auth"), \
+             patch.object(core, "get_startup", return_value={}), \
+             patch.object(core, "get_pins", return_value={"statusCode": 0}), \
+             patch.object(core, "get_pix_participants", return_value=[]), \
+             patch.object(core, "post_pix_payment_by_key", return_value={"id": "pix-123", "receiver": {}}), \
+             patch.object(core, "create_shopping_cart", return_value={"id": "cart-123"}), \
+             patch.object(core, "set_payment_method", return_value={}), \
+             patch.object(core, "post_sr_session", return_value={}), \
+             patch.object(core, "execute_purchase", side_effect=RuntimeError("timeout")) as purchase:
+            response = TestClient(app).post(
+                "/pix/key",
+                headers={"Authorization": "Bearer unit-test-token"},
+                json={"key_type": "CPF", "key_value": "123.456.789-09", "amount": "1.00"},
+            )
+        self.assertEqual(response.status_code, 500)
+        self.assertFalse(response.json()["detail"]["retry_safe"])
+        self.assertTrue(response.json()["detail"]["uncertain"])
+        purchase.assert_called_once()
 
     def test_inconsistent_completed_result_remains_uncertain(self):
         formatted = _format_pix_response({
