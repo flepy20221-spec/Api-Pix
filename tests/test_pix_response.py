@@ -250,3 +250,14 @@ class PixApiAuthTest(unittest.TestCase):
         self.assertTrue(detail["uncertain"])
         self.assertTrue(detail["request_id"])
         self.assertNotIn("PRIVATE-ERROR-CONTENT", response.text)
+
+    def test_inconsistent_completed_result_remains_uncertain(self):
+        formatted = _format_pix_response({
+            "success": False,
+            "amount": "1.00",
+            "receiver": {},
+            "result": {"status": "completed", "done": True},
+        })
+        self.assertFalse(formatted["success"])
+        self.assertFalse(formatted["retry_safe"])
+        self.assertTrue(formatted["uncertain"])

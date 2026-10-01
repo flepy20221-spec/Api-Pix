@@ -204,6 +204,9 @@ def _format_pix_response(tx: dict) -> dict:
     result = tx.get("result") if isinstance(tx.get("result"), dict) else {}
 
     status = _get_transaction_status(result)
+    flow_success = bool(tx.get("success"))
+    completed = flow_success and status == "completed"
+    retry_safe = flow_success and status == "failed"
     messages = {
         "completed": "Pix realizado com sucesso.",
         "pending_authentication": "Pix aguardando autenticacao.",
@@ -216,10 +219,10 @@ def _format_pix_response(tx: dict) -> dict:
     currency = str(result.get("currency") or "BRL")
 
     return {
-        "success": bool(tx.get("success")) and status == "completed",
+        "success": completed,
         "message": messages[status],
-        "retry_safe": status == "failed",
-        "uncertain": status in {"processing", "pending_authentication"},
+        "retry_safe": retry_safe,
+        "uncertain": not completed and not retry_safe,
         "transaction": {
             "status": status,
             "amount": {
