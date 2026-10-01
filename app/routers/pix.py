@@ -17,6 +17,7 @@ from app.core import (
     get_balance,
     build_integrity_hash,
     PixError,
+    PixPreparationError,
     PIX_DEFAULT_DESCRIPTION,
 )
 from app.models.schemas import (
@@ -184,6 +185,8 @@ def _get_transaction_status(result: dict) -> str:
     action = str(result.get("action", "")).lower()
     title = str(result.get("title", "")).lower()
 
+    if status in {"-1", "400", "401", "403", "422", "failed", "error", "rejected"}:
+        return "failed"
     if (
         result.get("done") is True
         or status in {"1", "100", "101", "done", "approved", "completed", "success"}
@@ -193,8 +196,6 @@ def _get_transaction_status(result: dict) -> str:
         return "completed"
     if action == "require-pin":
         return "pending_authentication"
-    if status in {"-1", "400", "401", "403", "422", "failed", "error", "rejected"}:
-        return "failed"
     return "processing"
 
 
@@ -341,10 +342,21 @@ def pagar_por_chave(req: PixKeyRequest, request: Request):
         )
         _record(result, "key")
         return _format_pix_response(result)
+    except PixPreparationError as e:
+        request_id = _request_id(request)
+        log.warning(
+            "PIX preparation failed request_id=%s stage=%s provider_http=%s cause=%s",
+            request_id, e.stage, e.provider_status, type(e.__cause__).__name__,
+        )
+        raise HTTPException(status_code=e.status_code, detail=_pix_failure_detail(
+            request_id, retry_safe=True, code=e.code,
+            message="O pagamento não foi iniciado. Verifique a chave e a carteira PIX antes de tentar novamente.",
+        ))
     except PixError as e:
         request_id = _request_id(request)
         raise HTTPException(status_code=e.status_code, detail=_pix_failure_detail(
-            request_id, retry_safe=True, code=e.code or "pix_rejected", message=e.message
+            request_id, retry_safe=False, code=e.code or "payment_outcome_unknown",
+            message="Não foi possível confirmar o pagamento. Consulte o provedor antes de qualquer reenvio.",
         ))
     except Exception:
         request_id = _request_id(request)
