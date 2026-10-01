@@ -19,43 +19,42 @@ import requests
 log = logging.getLogger(__name__)
 
 # ==============================================================================
-# CONFIGURAÇÃO — lida de variáveis de ambiente (Railway) com fallback nas
-# constantes extraídas do APK/HAR. Defina as vars no Railway para sobrescrever.
+# CONFIGURAÇÃO — valores de conta/dispositivo somente via ambiente do serviço.
 # ==============================================================================
 
-BEARER_TOKEN          = os.getenv("BEARER_TOKEN",          "SEU_BEARER_TOKEN_AQUI")
-RECARGA_REFRESH_TOKEN = os.getenv("RECARGA_REFRESH_TOKEN",  "SEU_RECARGA_REFRESH_TOKEN_AQUI")
-BEARER_EXPIRES        = int(os.getenv("BEARER_EXPIRES",    "1789281909955"))
+BEARER_TOKEN          = os.getenv("BEARER_TOKEN", "")
+RECARGA_REFRESH_TOKEN = os.getenv("RECARGA_REFRESH_TOKEN", "")
+BEARER_EXPIRES        = int(os.getenv("BEARER_EXPIRES", "0"))
 
-USER_ID        = os.getenv("USER_ID",        "46001996")
-CLIENT_ID      = os.getenv("CLIENT_ID",      "2a60827c31717a2e9c576acd16f1d9f6")
-DEVICE_ID      = os.getenv("DEVICE_ID",      "bba8612ff757fa8e")
-DEVICE_UUID    = os.getenv("DEVICE_UUID",    "4bd09ce7-21a1-43c5-bcc2-0f85efb1824c")
-DEVICE_INSTID  = os.getenv("DEVICE_INSTID",  "ejFnehDrSCuCtHmXDOB6br")
-ADVERTISING_ID = os.getenv("ADVERTISING_ID", "19764f27-80ed-4987-b2e9-083a03cd1fef")
-PIN_CODE       = os.getenv("PIN_CODE", "SEU_PIN_AQUI")
+USER_ID        = os.getenv("USER_ID", "")
+CLIENT_ID      = os.getenv("CLIENT_ID", "")
+DEVICE_ID      = os.getenv("DEVICE_ID", "")
+DEVICE_UUID    = os.getenv("DEVICE_UUID", "")
+DEVICE_INSTID  = os.getenv("DEVICE_INSTID", "")
+ADVERTISING_ID = os.getenv("ADVERTISING_ID", "")
+PIN_CODE       = os.getenv("PIN_CODE", "")
 PIN_MODE       = os.getenv("PIN_MODE",       "biometric")
 COOKIE_AB1     = os.getenv("COOKIE_AB1",     "6")
-HID            = os.getenv("HID",            "crm_1778702166")
-GEO_LAT        = float(os.getenv("GEO_LAT", "-23.3868651"))
-GEO_LON        = float(os.getenv("GEO_LON", "-46.2982546"))
+HID            = os.getenv("HID", "")
+GEO_LAT        = float(os.getenv("GEO_LAT", "0"))
+GEO_LON        = float(os.getenv("GEO_LON", "0"))
 
-GOOGLE_CLIENT_ID     = os.getenv("GOOGLE_CLIENT_ID",     "165583505969-4j3h2c6n3295ds01o2cn9d0vsjfb4tts.apps.googleusercontent.com")
-GOOGLE_REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN", "SEU_GOOGLE_REFRESH_TOKEN_AQUI")
+GOOGLE_CLIENT_ID     = os.getenv("GOOGLE_CLIENT_ID", "")
+GOOGLE_REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN", "")
 
-FIREBASE_API_KEY    = os.getenv("FIREBASE_API_KEY",    "AIzaSyA6jHFTdkscyoXeX66HCVtvzgOQ2tNL1iU")
-FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "fnbox.com:api-project-149463936710")
-FIS_FID             = os.getenv("FIS_FID",             "ejFnehDrSCuCtHmXDOB6br")
-FIS_REFRESH_TOKEN   = os.getenv("FIS_REFRESH_TOKEN",   "SEU_FIS_REFRESH_TOKEN_AQUI")
+FIREBASE_API_KEY    = os.getenv("FIREBASE_API_KEY", "")
+FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "")
+FIS_FID             = os.getenv("FIS_FID", "")
+FIS_REFRESH_TOKEN   = os.getenv("FIS_REFRESH_TOKEN", "")
 
 PIX_HMAC_SECRET = os.getenv("PIX_HMAC_SECRET", "")
 
 # Mensagem/descrição padrão enviada junto ao Pix (visível no comprovante)
 PIX_DEFAULT_DESCRIPTION = os.getenv("PIX_DEFAULT_DESCRIPTION", "")
 
-# Destinatário padrão (contato recente do HAR)
-RECEIVER_PERSON_ID  = os.getenv("RECEIVER_PERSON_ID",  "01a044eb-02f1-72c4-aa94-b7a5c1b3d00b")
-RECEIVER_ACCOUNT_ID = os.getenv("RECEIVER_ACCOUNT_ID", "01a044eb-02f1-789c-9973-c02404f22608")
+# Destinatário padrão para a rota de contato, configurado no serviço.
+RECEIVER_PERSON_ID  = os.getenv("RECEIVER_PERSON_ID", "")
+RECEIVER_ACCOUNT_ID = os.getenv("RECEIVER_ACCOUNT_ID", "")
 
 BASE_URL   = "https://api.recarga.com"
 USER_AGENT = (
@@ -135,7 +134,7 @@ def renovar_bearer_token() -> str:
         timeout=15,
     )
     if g_resp.status_code != 200:
-        raise RuntimeError(f"Falha Google token: HTTP {g_resp.status_code} — {g_resp.text[:200]}")
+        raise RuntimeError(f"Falha Google token: HTTP {g_resp.status_code}")
 
     google_access_token = g_resp.json()["access_token"]
     _state["google_access_token"] = google_access_token
@@ -177,7 +176,7 @@ def renovar_bearer_token() -> str:
         timeout=15,
     )
     if login_resp.status_code != 200:
-        raise RuntimeError(f"Falha re-login RecargaPay: HTTP {login_resp.status_code} — {login_resp.text[:200]}")
+        raise RuntimeError(f"Falha re-login RecargaPay: HTTP {login_resp.status_code}")
 
     login_data = login_resp.json()
     new_bearer  = login_data["access_token"]
@@ -191,7 +190,7 @@ def renovar_bearer_token() -> str:
     _state["last_login"]            = datetime.utcnow().isoformat()
 
     session.headers["authorization"] = f"Bearer {new_bearer}"
-    log.info(f"[Auth] Bearer Token renovado: {new_bearer[:8]}... (expira em ~{(new_expires/1000 - time.time())/3600:.1f}h)")
+    log.info("[Auth] Bearer Token renovado (expira em ~%.1fh)", (new_expires/1000 - time.time())/3600)
     return new_bearer
 
 
@@ -313,6 +312,25 @@ class PixError(Exception):
         self.message     = message
         self.status_code = status_code
         super().__init__(message)
+
+
+class PixPreparationError(Exception):
+    """A failure before the first purchase request: no money was sent."""
+
+    def __init__(self, stage: str, cause: Exception):
+        self.stage = stage
+        self.provider_status = (
+            cause.response.status_code
+            if isinstance(cause, requests.HTTPError) and cause.response is not None
+            else None
+        )
+        self.code = cause.code if isinstance(cause, PixError) else "pix_preparation_failed"
+        self.status_code = (
+            cause.status_code
+            if isinstance(cause, PixError) and 400 <= cause.status_code < 500
+            else 503
+        )
+        super().__init__(f"PIX preparation failed at {stage}")
 
 
 # ==============================================================================
@@ -573,34 +591,50 @@ def fluxo_pix_por_chave(
     description: str = None,
 ) -> dict:
     """Executa o fluxo completo de pagamento PIX por chave."""
-    key_value = normalize_pix_key_value(key_type, key_value)
-    _ensure_auth()
+    # Only the purchase endpoint can move money. A preparation failure is safe
+    # to release for a later admin attempt; any exception once purchase starts
+    # remains uncertain and must be reconciled without another payment call.
+    stage = "normalize_key"
+    try:
+        key_value = normalize_pix_key_value(key_type, key_value)
+        stage = "authentication"
+        _ensure_auth()
 
-    get_startup()
-    pins = get_pins()
-    if pins.get("statusCode", -1) not in (-1, 0, None):
-        log.warning(f"[PIX] PIN status inesperado: {pins}")
+        stage = "startup"
+        get_startup()
+        stage = "pin_read"
+        pins = get_pins()
+        if pins.get("statusCode", -1) not in (-1, 0, None):
+            log.warning("[PIX] Unexpected PIN read status")
 
-    get_pix_participants()
+        stage = "participants"
+        get_pix_participants()
 
-    pix = post_pix_payment_by_key(key_type, key_value, integrity_hash)
-    pix_id = pix["id"]
+        stage = "recipient_lookup"
+        pix = post_pix_payment_by_key(key_type, key_value, integrity_hash)
+        pix_id = pix["id"]
 
-    cart = create_shopping_cart(pix_id, amount, description=description)
-    cart_id = cart["id"]
+        stage = "shopping_cart"
+        cart = create_shopping_cart(pix_id, amount, description=description)
+        cart_id = cart["id"]
 
-    set_payment_method(cart_id, payment_method)
+        stage = "payment_method"
+        set_payment_method(cart_id, payment_method)
 
-    pin_result = get_pins(pin=PIN_CODE)
-    if pin_result.get("statusCode", -1) != 0:
-        raise PixError(
-            code="invalid_pin",
-            title="PIN inválido",
-            message=f"Validação do PIN falhou: {pin_result}",
-            status_code=400,
-        )
+        stage = "pin_verification"
+        pin_result = get_pins(pin=PIN_CODE)
+        if pin_result.get("statusCode", -1) != 0:
+            raise PixError(
+                code="invalid_pin",
+                title="PIN inválido",
+                message="Validação do PIN falhou.",
+                status_code=400,
+            )
 
-    post_sr_session()
+        stage = "risk_session"
+        post_sr_session()
+    except Exception as exc:
+        raise PixPreparationError(stage, exc) from exc
 
     purchase = execute_purchase(cart_id, pin=PIN_CODE)
     run_id   = purchase["runId"]
