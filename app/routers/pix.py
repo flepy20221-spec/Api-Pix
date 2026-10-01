@@ -1,7 +1,10 @@
+import logging
+import sys
+import traceback
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from app.core import (
     fluxo_pix_por_chave,
@@ -29,6 +32,7 @@ from app.models.schemas import (
 from app.responses import PrettyJSONResponse
 
 router = APIRouter(prefix="/pix", tags=["Pagamentos PIX"])
+log = logging.getLogger("recargapay.pix")
 
 # Histórico em memória (persiste enquanto o servidor estiver rodando)
 _history: list[TransactionRecord] = []
@@ -212,8 +216,10 @@ def _format_pix_response(tx: dict) -> dict:
     currency = str(result.get("currency") or "BRL")
 
     return {
-        "success": bool(tx.get("success")) and status != "failed",
+        "success": bool(tx.get("success")) and status == "completed",
         "message": messages[status],
+        "retry_safe": status == "failed",
+        "uncertain": status in {"processing", "pending_authentication"},
         "transaction": {
             "status": status,
             "amount": {
@@ -273,6 +279,29 @@ def _record(tx: dict, tx_type: str) -> TransactionRecord:
 
 
 # ==============================================================================
+# SAFE PAYMENT FAILURE CONTRACT
+# ==============================================================================
+
+def _request_id(request: Request) -> str:
+    return getattr(request.state, "request_id", str(uuid.uuid4()))
+
+def _sanitized_stack() -> str:
+    """Log frame locations only; exception messages may contain credentials/PII."""
+    frames = traceback.extract_tb(sys.exc_info()[2])
+    return " <- ".join(f"{frame.filename.rsplit('/', 1)[-1]}:{frame.lineno}:{frame.name}" for frame in frames)
+
+def _pix_failure_detail(request_id: str, *, retry_safe: bool, code: str, message: str) -> dict:
+    return {
+        "error": True,
+        "code": code,
+        "message": message,
+        "retry_safe": retry_safe,
+        "uncertain": not retry_safe,
+        "request_id": request_id,
+    }
+
+
+# ==============================================================================
 # ENDPOINTS
 # ==============================================================================
 
@@ -283,7 +312,7 @@ def _record(tx: dict, tx_type: str) -> TransactionRecord:
     response_class=PrettyJSONResponse,
     summary="Pagar PIX por chave (CPF, CNPJ, PHONE, EMAIL, EVP)",
 )
-def pagar_por_chave(req: PixKeyRequest):
+def pagar_por_chave(req: PixKeyRequest, request: Request):
     """
     Executa o fluxo completo de pagamento PIX por chave.
 
@@ -310,13 +339,17 @@ def pagar_por_chave(req: PixKeyRequest):
         _record(result, "key")
         return _format_pix_response(result)
     except PixError as e:
-        raise HTTPException(status_code=e.status_code, detail={
-            "code":    e.code,
-            "title":   e.title,
-            "message": e.message,
-        })
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        request_id = _request_id(request)
+        raise HTTPException(status_code=e.status_code, detail=_pix_failure_detail(
+            request_id, retry_safe=True, code=e.code or "pix_rejected", message=e.message
+        ))
+    except Exception:
+        request_id = _request_id(request)
+        log.error("PIX key payment failed request_id=%s stack=%s", request_id, _sanitized_stack())
+        raise HTTPException(status_code=500, detail=_pix_failure_detail(
+            request_id, retry_safe=False, code="payment_outcome_unknown",
+            message="Não foi possível confirmar o resultado do pagamento. Consulte o provedor antes de qualquer reenvio.",
+        ))
 
 
 @router.post(
@@ -326,7 +359,7 @@ def pagar_por_chave(req: PixKeyRequest):
     response_class=PrettyJSONResponse,
     summary="Pagar PIX para contato recente (personId + accountId)",
 )
-def pagar_por_contato(req: PixContactRequest):
+def pagar_por_contato(req: PixContactRequest, request: Request):
     """
     Executa o fluxo completo de pagamento PIX para um contato já conhecido.
 
@@ -344,13 +377,17 @@ def pagar_por_contato(req: PixContactRequest):
         _record(result, "contact")
         return _format_pix_response(result)
     except PixError as e:
-        raise HTTPException(status_code=e.status_code, detail={
-            "code":    e.code,
-            "title":   e.title,
-            "message": e.message,
-        })
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        request_id = _request_id(request)
+        raise HTTPException(status_code=e.status_code, detail=_pix_failure_detail(
+            request_id, retry_safe=True, code=e.code or "pix_rejected", message=e.message
+        ))
+    except Exception:
+        request_id = _request_id(request)
+        log.error("PIX contact payment failed request_id=%s stack=%s", request_id, _sanitized_stack())
+        raise HTTPException(status_code=500, detail=_pix_failure_detail(
+            request_id, retry_safe=False, code="payment_outcome_unknown",
+            message="Não foi possível confirmar o resultado do pagamento. Consulte o provedor antes de qualquer reenvio.",
+        ))
 
 
 @router.get(

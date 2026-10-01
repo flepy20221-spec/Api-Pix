@@ -12,6 +12,8 @@ import logging
 from datetime import datetime
 from typing import Optional
 
+from app.utils.pix_keys import normalize_pix_key_value
+
 import requests
 
 log = logging.getLogger(__name__)
@@ -46,7 +48,7 @@ FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "fnbox.com:api-project-14
 FIS_FID             = os.getenv("FIS_FID",             "ejFnehDrSCuCtHmXDOB6br")
 FIS_REFRESH_TOKEN   = os.getenv("FIS_REFRESH_TOKEN",   "SEU_FIS_REFRESH_TOKEN_AQUI")
 
-PIX_HMAC_SECRET = os.getenv("PIX_HMAC_SECRET", "99JTe5iL5080hMyhv3Ad")
+PIX_HMAC_SECRET = os.getenv("PIX_HMAC_SECRET", "")
 
 # Mensagem/descrição padrão enviada junto ao Pix (visível no comprovante)
 PIX_DEFAULT_DESCRIPTION = os.getenv("PIX_DEFAULT_DESCRIPTION", "")
@@ -252,7 +254,14 @@ def _parse_body(data: dict) -> dict:
 
 
 def build_integrity_hash(key_value: str) -> str:
-    """HMAC-SHA256(key=PIX_HMAC_SECRET, msg=key_value) — extraído do classes10.dex."""
+    """HMAC-SHA256(key=PIX_HMAC_SECRET, msg=key_value)."""
+    if not PIX_HMAC_SECRET:
+        raise PixError(
+            code="pix_hmac_not_configured",
+            title="Configuração incompleta",
+            message="A chave de integridade PIX não está configurada no servidor.",
+            status_code=503,
+        )
     return _hmac_module.new(
         PIX_HMAC_SECRET.encode(),
         key_value.encode(),
@@ -419,6 +428,7 @@ def post_pix_payment_by_key(
     key_value: str,
     integrity_hash: str = None,
 ) -> dict:
+    key_value = normalize_pix_key_value(key_type, key_value)
     if integrity_hash is None:
         integrity_hash = build_integrity_hash(key_value)
     r = session.post(
@@ -563,6 +573,7 @@ def fluxo_pix_por_chave(
     description: str = None,
 ) -> dict:
     """Executa o fluxo completo de pagamento PIX por chave."""
+    key_value = normalize_pix_key_value(key_type, key_value)
     _ensure_auth()
 
     get_startup()
@@ -594,13 +605,11 @@ def fluxo_pix_por_chave(
     purchase = execute_purchase(cart_id, pin=PIN_CODE)
     run_id   = purchase["runId"]
 
+    # A purchase request has already reached the provider. Never submit it a
+    # second time just because a poll still reports an authentication step;
+    # expose that state as nonterminal for manual reconciliation instead.
     result = poll_status(cart_id, run_id)
     body   = _parse_body(result)
-
-    if isinstance(body, dict) and body.get("action") == "require-pin":
-        purchase2 = execute_purchase(cart_id, pin=PIN_CODE)
-        result    = poll_status(cart_id, purchase2["runId"])
-        body      = _parse_body(result)
 
     return {
         "success":        True,
@@ -658,13 +667,10 @@ def fluxo_pix_por_contato(
     purchase = execute_purchase(cart_id, pin=PIN_CODE)
     run_id   = purchase["runId"]
 
+    # Do not issue a second purchase after a nonterminal response. A pending
+    # authentication state must be reconciled without repeating the side effect.
     result = poll_status(cart_id, run_id)
     body   = _parse_body(result)
-
-    if isinstance(body, dict) and body.get("action") == "require-pin":
-        purchase2 = execute_purchase(cart_id, pin=PIN_CODE)
-        result    = poll_status(cart_id, purchase2["runId"])
-        body      = _parse_body(result)
 
     get_raf_context()
 

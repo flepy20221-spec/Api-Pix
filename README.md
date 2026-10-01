@@ -153,3 +153,10 @@ A API renova o Bearer Token automaticamente em 2 etapas:
 2. **RecargaPay login**: `grant_type=google_access_token` → novo Bearer Token (~24h)
 
 Nenhuma intervenção manual é necessária enquanto o `GOOGLE_REFRESH_TOKEN` estiver válido.
+
+
+## Segurança do serviço
+
+Os endpoints `/pix/*` e `/status*` exigem `Authorization: Bearer <PIX_API_TOKEN>`. Configure o mesmo valor forte e aleatório em `PIX_API_TOKEN` nos serviços Railway da API PIX e do Painel Admin. A API falha fechada (HTTP 503) se a variável da API estiver ausente; chamadas sem token válido são rejeitadas. `/health` permanece público para health checks.
+
+Configure também `PIX_HMAC_SECRET` e `PIN_CODE` somente como variáveis privadas do serviço. Não use segredos que já tenham aparecido no repositório ou em seu histórico; revogue e substitua credenciais expostas.

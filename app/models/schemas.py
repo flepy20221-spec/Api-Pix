@@ -1,6 +1,8 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List
 from enum import Enum
+
+from app.utils.pix_keys import normalize_pix_key_value
 
 
 class KeyType(str, Enum):
@@ -21,6 +23,14 @@ class PixKeyRequest(BaseModel):
     amount:         str     = Field("0.01", description="Valor em BRL (ex: '10.00')")
     payment_method: str     = Field("WALLET", description="Método de pagamento: WALLET ou ID do cartão")
     description:    Optional[str] = Field(None, description="Mensagem/descrição visível no comprovante (opcional)")
+
+    @field_validator("key_value")
+    @classmethod
+    def normalize_document_key(cls, value: str, info):
+        key_type = info.data.get("key_type")
+        if key_type is None:
+            return value
+        return normalize_pix_key_value(key_type, value)
 
     class Config:
         json_schema_extra = {
@@ -106,6 +116,8 @@ class PixResponse(BaseModel):
     message:     str
     transaction: PixTransactionInfo
     receiver:    Optional[PixReceiverInfo] = None
+    retry_safe:  bool = False
+    uncertain:   bool = False
 
 
 class BalanceInfo(BaseModel):
