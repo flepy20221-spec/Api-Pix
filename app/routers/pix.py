@@ -348,9 +348,15 @@ def pagar_por_chave(req: PixKeyRequest, request: Request):
             "PIX preparation failed request_id=%s stage=%s provider_http=%s cause=%s",
             request_id, e.stage, e.provider_status, type(e.__cause__).__name__,
         )
+        message = (
+            "A carteira PIX não conseguiu consultar a chave neste momento. "
+            "Nenhum pagamento foi iniciado. Aguarde antes de tentar novamente."
+            if e.stage == "recipient_lookup" and e.provider_status and e.provider_status >= 500
+            else "O pagamento não foi iniciado. Verifique a chave e a carteira PIX antes de tentar novamente."
+        )
         raise HTTPException(status_code=e.status_code, detail=_pix_failure_detail(
             request_id, retry_safe=True, code=e.code,
-            message="O pagamento não foi iniciado. Verifique a chave e a carteira PIX antes de tentar novamente.",
+            message=message,
         ))
     except PixError as e:
         request_id = _request_id(request)
