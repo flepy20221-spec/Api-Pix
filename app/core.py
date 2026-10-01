@@ -9,6 +9,7 @@ import json
 import os
 import time
 import logging
+import re
 from datetime import datetime
 from typing import Optional
 
@@ -207,6 +208,16 @@ def _check_401(r: requests.Response):
         renovar_bearer_token()
 
 
+def _request_with_auth_retry(send):
+    """Repeat a pre-purchase request once after an expired bearer token."""
+    response = send()
+    if response.status_code == 401:
+        log.warning("[Auth] HTTP 401 — renovando token e repetindo consulta...")
+        renovar_bearer_token()
+        response = send()
+    return response
+
+
 # ==============================================================================
 # HELPERS
 # ==============================================================================
@@ -324,6 +335,16 @@ class PixPreparationError(Exception):
             if isinstance(cause, requests.HTTPError) and cause.response is not None
             else None
         )
+        self.provider_code = None
+        response = cause.response if isinstance(cause, requests.HTTPError) else None
+        if response is not None:
+            try:
+                payload = response.json()
+                code = (payload.get("code") or payload.get("error_code") or payload.get("error")) if isinstance(payload, dict) else None
+                if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", code):
+                    self.provider_code = code
+            except (ValueError, TypeError):
+                pass
         self.code = cause.code if isinstance(cause, PixError) else "pix_preparation_failed"
         self.status_code = (
             cause.status_code
@@ -339,24 +360,24 @@ class PixPreparationError(Exception):
 
 def get_startup() -> dict:
     _ensure_auth()
-    r = session.get(f"{BASE_URL}/api/v2/app/startup",
-                    headers=_h("https://recargapay.com.br/", "/"), timeout=30)
-    _check_401(r)
+    r = _request_with_auth_retry(lambda: session.get(
+        f"{BASE_URL}/api/v2/app/startup",
+        headers=_h("https://recargapay.com.br/", "/"), timeout=30,
+    ))
     r.raise_for_status()
     return r.json()
 
 
 def get_pins(pin: str = None) -> dict:
     _ensure_auth()
-    r = session.get(
+    r = _request_with_auth_retry(lambda: session.get(
         f"{BASE_URL}/api/0.1/users/me/pins",
         params={"device_id": DEVICE_ID},
         headers=_h("https://recargapay.com.br/", "/",
                    ctype="application/x-www-form-urlencoded;charset=UTF-8",
                    pin=pin),
         timeout=30,
-    )
-    _check_401(r)
+    ))
     r.raise_for_status()
     return r.json()
 
@@ -404,12 +425,12 @@ def get_creditcards() -> dict:
 
 
 def get_balance() -> dict:
-    r = session.get(
+    _ensure_auth()
+    r = _request_with_auth_retry(lambda: session.get(
         f"{BASE_URL}/api/0.1/users/me/balance",
         headers=_h("https://recargapay.com.br/", "/"),
         timeout=30,
-    )
-    _check_401(r)
+    ))
     r.raise_for_status()
     return r.json()
 
@@ -446,25 +467,35 @@ def post_pix_payment_by_key(
     key_value: str,
     integrity_hash: str = None,
 ) -> dict:
+    _ensure_auth()
     key_value = normalize_pix_key_value(key_type, key_value)
     if integrity_hash is None:
         integrity_hash = build_integrity_hash(key_value)
-    r = session.post(
-        f"{BASE_URL}/api/v2/persons/me/dict/pix/payments",
-        json={
-            "receiver": {
-                "keyType":     key_type.upper(),
-                "key":         key_value,
-                "inputMethod": "TYPED_KEY",
+
+    def lookup():
+        return session.post(
+            f"{BASE_URL}/api/v2/persons/me/dict/pix/payments",
+            json={
+                "receiver": {
+                    "keyType": key_type.upper(),
+                    "key": key_value,
+                    "inputMethod": "TYPED_KEY",
+                },
+                "integrityHash": integrity_hash,
             },
-            "integrityHash": integrity_hash,
-        },
-        headers=_h("https://recargapay.com.br/pix/transactions/contacts",
-                   "/pix/transactions/contacts",
-                   ctype="application/json;charset=UTF-8"),
-        timeout=30,
-    )
-    _check_401(r)
+            headers=_h("https://recargapay.com.br/pix/transactions/contacts",
+                       "/pix/transactions/contacts",
+                       ctype="application/json;charset=UTF-8"),
+            timeout=30,
+        )
+
+    r = _request_with_auth_retry(lookup)
+    if r.status_code in (502, 503, 504):
+        # This only prepares a recipient. The money-moving purchase call is
+        # deliberately outside this retry and must never be repeated blindly.
+        log.warning("[PIX] Recipient lookup returned HTTP %s; retrying once", r.status_code)
+        time.sleep(1)
+        r = _request_with_auth_retry(lookup)
     _handle_pix_error(r)
     r.raise_for_status()
     return r.json()
