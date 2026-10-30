@@ -141,6 +141,18 @@ async def generic_error_handler(request: Request, exc: Exception):
 # MIDDLEWARE — log de requisições
 # ==============================================================================
 
+def _valid_service_token(presented: str) -> bool:
+    """Accept either wallet client without replacing the existing CashPix secret."""
+    candidates = (
+        os.getenv("PIX_API_TOKEN", "").strip(),
+        os.getenv("COINPIX_PIX_API_TOKEN", "").strip(),
+    )
+    return bool(presented) and any(
+        hmac.compare_digest(presented, candidate)
+        for candidate in candidates if candidate
+    )
+
+
 @app.middleware("http")
 async def request_context_auth_and_logging(request: Request, call_next):
     supplied_id = request.headers.get("x-request-id", "")
@@ -154,7 +166,8 @@ async def request_context_auth_and_logging(request: Request, call_next):
     protected = path.startswith("/pix/") or path == "/pix" or path.startswith("/status/") or path == "/status"
     if protected and request.method.upper() != "OPTIONS":
         expected = os.getenv("PIX_API_TOKEN", "").strip()
-        if not expected:
+        coinpix_token = os.getenv("COINPIX_PIX_API_TOKEN", "").strip()
+        if not expected and not coinpix_token:
             response = JSONResponse(status_code=503, content={
                 "error": True,
                 "code": "api_token_not_configured",
@@ -167,7 +180,7 @@ async def request_context_auth_and_logging(request: Request, call_next):
             return response
         authorization = request.headers.get("authorization", "")
         presented = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
-        if not presented or not hmac.compare_digest(presented, expected):
+        if not _valid_service_token(presented):
             response = JSONResponse(status_code=401, content={
                 "error": True,
                 "code": "unauthorized",
