@@ -2,6 +2,8 @@ name: Validate CashPix reconciliation
 on:
   push:
     branches: ['validate/cashpix-pix-provider-reconciliation']
+  pull_request:
+    branches: ['fix/cashpix-pix-provider-reconciliation']
 permissions:
   contents: read
 jobs:
