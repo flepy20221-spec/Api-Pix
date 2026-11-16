@@ -620,6 +620,7 @@ def fluxo_pix_por_chave(
     payment_method: str = "WALLET",
     integrity_hash: str = None,
     description: str = None,
+    on_purchase=None,
 ) -> dict:
     """Executa o fluxo completo de pagamento PIX por chave."""
     # Only the purchase endpoint can move money. A preparation failure is safe
@@ -669,6 +670,8 @@ def fluxo_pix_por_chave(
 
     purchase = execute_purchase(cart_id, pin=PIN_CODE)
     run_id   = purchase["runId"]
+    if on_purchase:
+        on_purchase(cart_id, run_id, pix_id)
 
     # A purchase request has already reached the provider. Never submit it a
     # second time just because a poll still reports an authentication step;
