@@ -1,4 +1,11 @@
+import hmac
 import logging
+import os
+import re
+import sqlite3
+from contextlib import closing
+from urllib.parse import urlparse
+from pydantic import BaseModel
 import sys
 import traceback
 import uuid
@@ -8,6 +15,9 @@ from fastapi import APIRouter, HTTPException, Request
 
 from app.core import (
     fluxo_pix_por_chave,
+    _ensure_auth,
+    _parse_body,
+    poll_status,
     fluxo_pix_por_contato,
     post_pix_payment_by_key,
     get_pix_contact_overview,
@@ -309,6 +319,135 @@ def _pix_failure_detail(request_id: str, *, retry_safe: bool, code: str, message
 # ENDPOINTS
 # ==============================================================================
 
+
+class CashPixReviewRequest(BaseModel):
+    attempt_id: uuid.UUID
+    withdrawal_id: uuid.UUID
+    amount: str
+
+
+def _review_connection():
+    path = os.environ.get("CASHPIX_REVIEW_JOURNAL_PATH", "/tmp/cashpix-review.sqlite3")
+    db = sqlite3.connect(path, timeout=3)
+    db.execute("""CREATE TABLE IF NOT EXISTS cashpix_purchases (
+        attempt_id TEXT PRIMARY KEY, withdrawal_id TEXT NOT NULL, amount TEXT NOT NULL,
+        cart_id TEXT NOT NULL, run_id TEXT NOT NULL, pix_id TEXT NOT NULL
+    )""")
+    return db
+
+
+def _save_cashpix_purchase(attempt, withdrawal, amount, cart, run, pix):
+    with closing(_review_connection()) as db, db:
+        db.execute("INSERT INTO cashpix_purchases VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                   (attempt, withdrawal, amount, str(cart), str(run), str(pix)))
+
+
+def _cashpix_token(request):
+    expected = os.getenv("PIX_API_TOKEN", "").strip()
+    authorization = request.headers.get("authorization", "")
+    prefix, _, token = authorization.partition(" ")
+    return bool(expected and prefix.lower() == "bearer" and
+                hmac.compare_digest(token.strip().encode(), expected.encode()))
+
+
+def _trusted_receipt(result: dict) -> str | None:
+    value = _get_receipt_url(result)
+    if not isinstance(value, str) or len(value) > 2048:
+        return None
+    try:
+        url = urlparse(value)
+        host = url.hostname or ""
+        if (url.scheme == "https" and (host == "recargapay.com.br" or host.endswith(".recargapay.com.br"))
+                and not url.username and not url.password and url.port in (None, 443)
+                and ("voucher" in url.path.lower() or "receipt" in url.path.lower())):
+            return value
+    except ValueError:
+        pass
+    return None
+
+
+def _provider_failure_reason(result: dict) -> str:
+    # Report a useful reason without copying arbitrary provider/private payloads.
+    text = str(result.get("title") or "").lower()
+    if "saldo" in text and "insuficiente" in text:
+        return "Saldo insuficiente na carteira do provedor."
+    if "pin" in text:
+        return "O provedor recusou a validação do PIN de pagamento."
+    if "limite" in text:
+        return "O provedor informou que o limite de pagamento foi atingido."
+    if "chave" in text and ("inválid" in text or "invalid" in text or "encontrad" in text):
+        return "A chave PIX foi recusada pelo provedor."
+    if "cancel" in text:
+        return "O provedor cancelou o pagamento."
+    return "O provedor confirmou a falha, mas não informou um motivo identificável."
+
+
+def _get_review_status(result: dict) -> str:
+    """Completion requires provider evidence; done alone only ends polling."""
+    status = str(result.get("status", "")).strip().lower()
+    action = str(result.get("action", "")).strip().lower()
+    title = str(result.get("title", "")).strip().lower()
+    if action == "require-pin":
+        return "pending_authentication"
+    if (status in {"-1", "400", "401", "403", "422", "failed", "error", "rejected", "cancelled", "canceled"}
+            or any(word in title for word in ("não realizado", "não foi realizado", "nao realizado", "não concluído", "falhou", "cancelado", "recusado"))):
+        return "failed"
+    if status in {"pending", "processing", "queued", "pending_authentication"}:
+        return "processing"
+    if (status in {"1", "100", "101", "approved", "completed", "success"}
+            or "pix feito" in title or "pix realizado" in title
+            or (_trusted_receipt(result) and result.get("orderId"))):
+        return "completed"
+    return "processing"
+
+
+@router.post("/payment-review", response_class=PrettyJSONResponse)
+def review_cashpix_purchase(req: CashPixReviewRequest, request: Request):
+    """Read the provider outcome of an existing CashPix purchase."""
+    if not _cashpix_token(request):
+        raise HTTPException(status_code=403, detail="Acesso não autorizado.")
+    if not re.fullmatch(r"\d{1,8}\.\d{2}", req.amount):
+        raise HTTPException(status_code=400, detail="Valor de conferência inválido.")
+    attempt, withdrawal = str(req.attempt_id), str(req.withdrawal_id)
+    with closing(_review_connection()) as db:
+        saved = db.execute("SELECT withdrawal_id, amount, cart_id, run_id, pix_id FROM cashpix_purchases "
+                           "WHERE attempt_id = ?", (attempt,)).fetchone()
+    if not saved or saved[:2] != (withdrawal, req.amount):
+        return {"status": "unavailable"}
+    _, _, cart, run, pix = saved
+    try:
+        _ensure_auth()
+        raw = poll_status(cart, run, max_attempts=1, interval=0)
+        result = _parse_body(raw)
+    except Exception:
+        raise HTTPException(status_code=502, detail="Consulta ao provedor indisponível.")
+    if not isinstance(result, dict):
+        return {"status": "unverified"}
+    status = _get_review_status(result)
+    receipt = _trusted_receipt(result)
+    order = str(result.get("orderId") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,120}", order) or order.lower() in {"unknown", "null", "0"}:
+        order = ""
+    raw_status = str(result.get("status", "")).strip().lower()
+    title = str(result.get("title", "")).strip().lower()
+    final_refusal = raw_status in {"failed", "rejected", "cancelled", "canceled"} or any(
+        marker in title for marker in ("pix não realizado", "pix nao realizado", "pix recusado", "pix cancelado")
+    )
+    paid = (status == "completed" and raw.get("done") is True and bool(order or receipt)
+            and bool(re.fullmatch(r"[A-Za-z0-9_-]{1,160}", pix))
+            and pix.lower() not in {"unknown", "null", "0", "none"})
+    refused = status == "failed" and raw.get("done") is True and final_refusal and not (
+        order or receipt or result.get("action") == "require-pin"
+    )
+    return {
+        "attempt_id": attempt, "withdrawal_id": withdrawal, "amount": req.amount,
+        "status": "completed" if paid else ("failed" if refused else "unverified"),
+        "authoritative": paid or refused,
+        "reference": pix if paid else None,
+        "receipt_url": receipt if paid else None,
+        "reason": _provider_failure_reason(result) if refused else None,
+    }
+
 @router.post(
     "/key",
     response_model=PixResponse,
@@ -332,6 +471,22 @@ def pagar_por_chave(req: PixKeyRequest, request: Request):
     O `integrityHash` é gerado automaticamente via `HMAC-SHA256`.
     O PIN é validado automaticamente via configuração.
     """
+    on_purchase = None
+    withdrawal_header = request.headers.get("x-cashpix-withdrawal-id")
+    if withdrawal_header and _cashpix_token(request):
+        try:
+            withdrawal = str(uuid.UUID(withdrawal_header))
+            amount = str(Decimal(req.amount).quantize(Decimal("0.01")))
+        except (ValueError, InvalidOperation):
+            raise HTTPException(status_code=400, detail="Vínculo CashPix inválido.")
+        attempt = _request_id(request)
+
+        def on_purchase(cart, run, pix):
+            try:
+                _save_cashpix_purchase(attempt, withdrawal, amount, cart, run, pix)
+            except (sqlite3.Error, OSError):
+                log.error("CashPix review journal unavailable request_id=%s", attempt)
+
     try:
         result = fluxo_pix_por_chave(
             key_type       = req.key_type.value,
@@ -339,6 +494,7 @@ def pagar_por_chave(req: PixKeyRequest, request: Request):
             amount         = req.amount,
             payment_method = req.payment_method,
             description    = req.description,
+            on_purchase    = on_purchase,
         )
         _record(result, "key")
         return _format_pix_response(result)
